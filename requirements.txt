@@ -1,0 +1,48 @@
+# Core Framework
+fastapi
+uvicorn[standard]
+python-multipart
+
+# LangChain & LangGraph
+langchain
+langchain-core
+langchain-openai
+langchain-anthropic
+langgraph
+langgraph-checkpoint
+langgraph-checkpoint-sqlite
+
+# MCP (Model Context Protocol)
+mcp
+
+# Database
+sqlalchemy
+aiosqlite
+psycopg2-binary
+
+# Pydantic
+pydantic
+pydantic-settings
+
+# Environment & Config
+python-dotenv
+
+# Async & WebSockets
+websocket
+sse-starlette
+
+# Utilities
+httpx
+tenacity
+python-json-logger
+
+# Testing
+pytest
+pytest-asyncio
+pytest-cov
+httpx
+
+# Development
+black
+ruff
+mypy
