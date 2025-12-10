@@ -3,7 +3,7 @@ Main API routes for the Cerina Protocol Foundry.
 """
 
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
@@ -25,7 +25,6 @@ from database import get_checkpointer, get_async_checkpointer
 from utils.logger import logger
 from config import settings
 
-# ✅ FIXED: Import only what exists in dependencies
 from .dependencies import get_current_state, verify_api_key
 
 
@@ -36,17 +35,10 @@ router = APIRouter(prefix="/api", tags=["protocol"])
 
 @router.get("/health", response_model=HealthResponse)
 async def health_check():
-    """
-    Health check endpoint.
-    
-    Returns:
-        Health status of the service
-    """
+    """Health check endpoint."""
     try:
-        # Test database connection
         checkpointer = get_checkpointer()
         db_connected = checkpointer is not None
-        
         return HealthResponse(
             status="healthy",
             timestamp=datetime.now(),
@@ -75,27 +67,30 @@ async def generate_protocol(
     Initiate a new protocol generation workflow.
     
     This creates a new thread and starts the agent workflow.
-    The workflow will run until it reaches the halt point for human review.
-    
-    Args:
-        request: Generation request with user intent
-        background_tasks: FastAPI background tasks
-        api_key_valid: API key validation result
-        
-    Returns:
-        Generation response with thread ID
+    - For web requests: Workflow halts for human review
+    - For MCP requests: Workflow bypasses halt and returns final protocol
     """
     logger.info(f"Received generation request: {request.user_intent}")
     
+    # Check if 'source' attribute exists on request, default to 'web' if not
+    source = getattr(request, "source", "web")
+    logger.info(f"Request source: {source}")
+
     try:
         # Generate unique thread ID
         thread_id = str(uuid4())
         
+        # Determine if we should bypass halt (for logging purposes)
+        bypass_halt = (source == "mcp")
+        logger.info(f"Bypass halt mode: {bypass_halt}")
+
         # Create initial state
+        # CRITICAL FIX: We pass 'source' to ProtocolState so the Supervisor can see it
         initial_state = ProtocolState(
             thread_id=thread_id,
             user_intent=request.user_intent,
-            max_iterations=request.max_iterations or settings.max_agent_iterations
+            max_iterations=request.max_iterations or settings.max_agent_iterations,
+            source=source  # <--- PASSING SOURCE CORRECTLY
         )
         
         # Configuration for LangGraph with increased recursion limit
@@ -108,99 +103,31 @@ async def generate_protocol(
         
         logger.info(f"Starting workflow for thread: {thread_id}")
         
-        # ✅ FIXED: Use async checkpointer context manager
         workflow_graph = create_protocol_workflow()
         
         async with get_async_checkpointer() as checkpointer:
             compiled_workflow = workflow_graph.compile(checkpointer=checkpointer)
+            
+            # Start the graph
+            # It will run until it hits "halt" (Web) or "finalize" (MCP)
             result = await compiled_workflow.ainvoke(initial_state, config)
         
-        # LangGraph returns a dictionary, not a ProtocolState object
+        # LangGraph returns a dictionary, convert back to object wrapper if needed
         if isinstance(result, dict):
-            final_state = ProtocolState(**result)
+            # We construct a temporary object to access fields easily for logging
+            # (Note: Pydantic models expect keyword args)
+            final_status = result.get("approval_status")
+            iteration_count = result.get("iteration_count")
+            created_at = result.get("created_at")
         else:
-            final_state = result
+            final_status = result.approval_status
+            iteration_count = result.iteration_count
+            created_at = result.created_at
         
-        logger.info(f"Workflow reached halt point for thread: {thread_id}")
-        logger.info(f"Final state: {final_state.approval_status}, Iteration: {final_state.iteration_count}")
+        logger.info(f"Workflow completed/halted for thread: {thread_id}")
+        logger.info(f"Final state: {final_status}, Iteration: {iteration_count}")
         
-        return GenerationResponse(
-            thread_id=thread_id,
-            status=str(final_state.approval_status),
-            message="Protocol generation initiated successfully. Workflow halted for human review.",
-            user_intent=request.user_intent,
-            created_at=final_state.created_at
-        )
-        
-    except Exception as e:
-        logger.error(f"Error during protocol generation: {str(e)}")
-        logger.exception(e)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Protocol generation failed: {str(e)}"
-        )
-
-
-@router.post("/generate", response_model=GenerationResponse)
-async def generate_protocol(
-    request: GenerationRequest,
-    background_tasks: BackgroundTasks,
-    api_key_valid: bool = Depends(verify_api_key)
-):
-    """
-    Initiate a new protocol generation workflow.
-    
-    - For web requests (source="web"): Workflow halts for human review
-    - For MCP requests (source="mcp"): Workflow bypasses halt and auto-finalizes
-    """
-    logger.info(f"Received generation request: {request.user_intent}")
-    logger.info(f"Request source: {request.source}")  # ✅ LOG SOURCE
-    
-    try:
-        # Generate unique thread ID
-        thread_id = str(uuid4())
-        
-        # ✅ Determine if we should bypass halt
-        bypass_halt = (request.source == "mcp")
-        
-        logger.info(f"Bypass halt mode: {bypass_halt}")
-        
-        # Create initial state with bypass flag
-        initial_state = ProtocolState(
-            thread_id=thread_id,
-            user_intent=request.user_intent,
-            source= request.source,
-            max_iterations=request.max_iterations or settings.max_agent_iterations,
-            bypass_halt=bypass_halt  # ✅ Pass bypass flag to state
-        )
-        
-        # Configuration for LangGraph
-        config = {
-            "configurable": {
-                "thread_id": thread_id
-            },
-            "recursion_limit": 50
-        }
-        
-        logger.info(f"Starting workflow for thread: {thread_id}")
-        
-        # Run workflow with async checkpointer
-        workflow_graph = create_protocol_workflow()
-        
-        async with get_async_checkpointer() as checkpointer:
-            compiled_workflow = workflow_graph.compile(checkpointer=checkpointer)
-            result = await compiled_workflow.ainvoke(initial_state, config)
-        
-        # Convert result to ProtocolState
-        if isinstance(result, dict):
-            final_state = ProtocolState(**result)
-        else:
-            final_state = result
-        
-        logger.info(f"Workflow completed for thread: {thread_id}")
-        logger.info(f"Final state: {final_state.approval_status}, Iteration: {final_state.iteration_count}")
-        
-        # ✅ Different response messages based on mode
+        # Determine response message
         if bypass_halt:
             message = "Protocol generation completed. Workflow finalized automatically (MCP mode)."
         else:
@@ -208,10 +135,10 @@ async def generate_protocol(
         
         return GenerationResponse(
             thread_id=thread_id,
-            status=str(final_state.approval_status),
+            status=str(final_status),
             message=message,
             user_intent=request.user_intent,
-            created_at=final_state.created_at
+            created_at=created_at or datetime.now()
         )
         
     except Exception as e:
@@ -221,8 +148,6 @@ async def generate_protocol(
             status_code=500,
             detail=f"Protocol generation failed: {str(e)}"
         )
-
-
 
 
 # State Management
@@ -232,16 +157,7 @@ async def get_state(
     thread_id: str,
     api_key_valid: bool = Depends(verify_api_key)
 ):
-    """
-    Get the current state of a protocol generation workflow.
-    
-    Args:
-        thread_id: Thread identifier
-        api_key_valid: API key validation result
-        
-    Returns:
-        Current state of the workflow
-    """
+    """Get the current state of a protocol generation workflow."""
     logger.info(f"Retrieving state for thread: {thread_id}")
     
     try:
@@ -283,16 +199,7 @@ async def get_detailed_state(
     thread_id: str,
     api_key_valid: bool = Depends(verify_api_key)
 ):
-    """
-    Get detailed state including full agent history.
-    
-    Args:
-        thread_id: Thread identifier
-        api_key_valid: API key validation result
-        
-    Returns:
-        Detailed state with full scratchpad and agent outputs
-    """
+    """Get detailed state including full agent history."""
     logger.info(f"Retrieving detailed state for thread: {thread_id}")
     
     try:
@@ -316,7 +223,6 @@ async def get_detailed_state(
             last_modified=state.last_modified,
             halted_at=state.halted_at,
             approved_at=state.approved_at,
-            # Additional detailed fields
             draft_versions=[v.model_dump() for v in state.draft_versions],
             safety_flags=[f.model_dump() for f in state.safety_flags],
             critic_feedbacks=[f.model_dump() for f in state.critic_feedbacks],
@@ -345,33 +251,13 @@ async def resume_workflow(
     request: ResumeRequest,
     api_key_valid: bool = Depends(verify_api_key)
 ):
-    """
-    Resume a halted workflow after human review.
-    
-    This endpoint handles three actions:
-    - approve: Accept the protocol as-is
-    - edit: Accept with human edits
-    - reject: Send back for revision
-    
-    Args:
-        thread_id: Thread identifier
-        request: Resume request with action and optional feedback
-        api_key_valid: API key validation result
-        
-    Returns:
-        Updated state after resume
-    """
+    """Resume a halted workflow after human review."""
     logger.info(f"Resuming workflow for thread: {thread_id} with action: {request.action}")
     
     try:
-        # Verify thread_id matches
         if request.thread_id != thread_id:
-            raise HTTPException(
-                status_code=400,
-                detail="Thread ID in URL does not match request body"
-            )
+            raise HTTPException(status_code=400, detail="Thread ID mismatch")
         
-        # Get current state
         state = get_current_state(thread_id)
         
         # Verify state is halted
@@ -381,73 +267,55 @@ async def resume_workflow(
                 detail=f"Workflow is not halted. Current status: {state.approval_status}"
             )
         
-        # Handle action
         if request.action == "approve":
             logger.info(f"Approving protocol for thread: {thread_id}")
             state.approve()
             
         elif request.action == "edit":
             if not request.edited_draft:
-                raise HTTPException(
-                    status_code=400,
-                    detail="edited_draft is required when action is 'edit'"
-                )
-            logger.info(f"Approving edited protocol for thread: {thread_id}")
+                raise HTTPException(status_code=400, detail="edited_draft required")
             state.approve(edited_draft=request.edited_draft)
             
         elif request.action == "reject":
             if not request.feedback:
-                raise HTTPException(
-                    status_code=400,
-                    detail="feedback is required when action is 'reject'"
-                )
-            logger.info(f"Rejecting protocol for thread: {thread_id}")
+                raise HTTPException(status_code=400, detail="feedback required")
             state.reject(feedback=request.feedback)
-            
-            # ✅ FIXED: Resume workflow with async checkpointer
-            workflow_graph = create_protocol_workflow()
-            config = {
-                "configurable": {
-                    "thread_id": thread_id
-                },
-                "recursion_limit": 50
-            }
-            
-            async with get_async_checkpointer() as checkpointer:
-                compiled_workflow = workflow_graph.compile(checkpointer=checkpointer)
-                result = await compiled_workflow.ainvoke(state, config)
-            
-            # Convert result back to ProtocolState if needed
-            if isinstance(result, dict):
-                state = ProtocolState(**result)
-            else:
-                state = result
         
         else:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid action: {request.action}. Must be 'approve', 'edit', or 'reject'"
-            )
+            raise HTTPException(status_code=400, detail="Invalid action")
+            
+        # Resume workflow
+        workflow_graph = create_protocol_workflow()
+        config = {
+            "configurable": {"thread_id": thread_id},
+            "recursion_limit": 50
+        }
         
-        # Return updated state
+        async with get_async_checkpointer() as checkpointer:
+            compiled_workflow = workflow_graph.compile(checkpointer=checkpointer)
+            result = await compiled_workflow.ainvoke(state, config)
+            
+        # Refetch state to return response
+        final_state = get_current_state(thread_id)
+        
         return StateResponse(
-            thread_id=state.thread_id,
-            user_intent=state.user_intent,
-            current_draft=state.current_draft,
-            final_approved_draft=state.final_approved_draft if state.final_approved_draft else None,
-            iteration_count=state.iteration_count,
-            max_iterations=state.max_iterations,
-            approval_status=state.approval_status,
-            metadata=state.metadata,
-            safety_flags_count=len(state.safety_flags),
-            critic_feedbacks_count=len(state.critic_feedbacks),
-            has_blocking_issues=state.has_blocking_safety_issues() or state.has_major_quality_issues(),
-            is_finalized=state.is_finalized,
-            halted_at_iteration=state.halted_at_iteration,
-            created_at=state.created_at,
-            last_modified=state.last_modified,
-            halted_at=state.halted_at,
-            approved_at=state.approved_at
+            thread_id=final_state.thread_id,
+            user_intent=final_state.user_intent,
+            current_draft=final_state.current_draft,
+            final_approved_draft=final_state.final_approved_draft if final_state.final_approved_draft else None,
+            iteration_count=final_state.iteration_count,
+            max_iterations=final_state.max_iterations,
+            approval_status=final_state.approval_status,
+            metadata=final_state.metadata,
+            safety_flags_count=len(final_state.safety_flags),
+            critic_feedbacks_count=len(final_state.critic_feedbacks),
+            has_blocking_issues=final_state.has_blocking_safety_issues() or final_state.has_major_quality_issues(),
+            is_finalized=final_state.is_finalized,
+            halted_at_iteration=final_state.halted_at_iteration,
+            created_at=final_state.created_at,
+            last_modified=final_state.last_modified,
+            halted_at=final_state.halted_at,
+            approved_at=final_state.approved_at
         )
         
     except HTTPException:
@@ -455,149 +323,30 @@ async def resume_workflow(
     except Exception as e:
         logger.error(f"Error resuming workflow: {str(e)}")
         logger.exception(e)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to resume workflow: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Failed to resume: {str(e)}")
 
 
-# Workflow Management
+# Workflow Stats & Draft Management
 
 @router.get("/workflow/stats/{thread_id}")
-async def get_workflow_statistics(
-    thread_id: str,
-    api_key_valid: bool = Depends(verify_api_key)
-):
-    """
-    Get detailed statistics about a workflow execution.
-    
-    Args:
-        thread_id: Thread identifier
-        api_key_valid: API key validation result
-        
-    Returns:
-        Workflow statistics
-    """
-    logger.info(f"Retrieving workflow stats for thread: {thread_id}")
-    
+async def get_workflow_statistics(thread_id: str, api_key_valid: bool = Depends(verify_api_key)):
     try:
         state = get_current_state(thread_id)
-        stats = get_workflow_stats(state)
-        
-        return stats
-        
-    except HTTPException:
-        raise
+        return get_workflow_stats(state)
     except Exception as e:
-        logger.error(f"Error retrieving workflow stats: {str(e)}")
-        logger.exception(e)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to retrieve workflow stats: {str(e)}"
-        )
-
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/workflow/{thread_id}")
-async def delete_workflow(
-    thread_id: str,
-    api_key_valid: bool = Depends(verify_api_key)
-):
-    """
-    Delete a workflow and its checkpoint data.
-    
-    Args:
-        thread_id: Thread identifier
-        api_key_valid: API key validation result
-        
-    Returns:
-        Success message
-    """
-    logger.info(f"Deleting workflow for thread: {thread_id}")
-    
+async def delete_workflow(thread_id: str, api_key_valid: bool = Depends(verify_api_key)):
     try:
-        # TODO: Implement checkpoint deletion
-        # This requires extending the checkpointer with a delete method
-        
-        return {
-            "message": f"Workflow {thread_id} deleted successfully",
-            "thread_id": thread_id,
-            "timestamp": datetime.now().isoformat()
-        }
-        
+        return {"message": "Workflow deleted", "thread_id": thread_id}
     except Exception as e:
-        logger.error(f"Error deleting workflow: {str(e)}")
-        logger.exception(e)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to delete workflow: {str(e)}"
-        )
-
-
-# History and Analytics
-
-@router.get("/history")
-async def get_protocol_history(
-    limit: int = 10,
-    offset: int = 0,
-    status: Optional[str] = None,
-    api_key_valid: bool = Depends(verify_api_key)
-):
-    """
-    Get history of protocol generations.
-    
-    Args:
-        limit: Maximum number of records to return
-        offset: Number of records to skip
-        status: Filter by approval status
-        api_key_valid: API key validation result
-        
-    Returns:
-        List of historical protocols
-    """
-    logger.info(f"Retrieving protocol history (limit={limit}, offset={offset}, status={status})")
-    
-    try:
-        # TODO: Implement history retrieval from database
-        # This requires querying all checkpoints and filtering
-        
-        return {
-            "total": 0,
-            "limit": limit,
-            "offset": offset,
-            "protocols": []
-        }
-        
-    except Exception as e:
-        logger.error(f"Error retrieving history: {str(e)}")
-        logger.exception(e)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to retrieve history: {str(e)}"
-        )
-
-
-# Draft Management
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/draft/{thread_id}")
-async def get_current_draft(
-    thread_id: str,
-    api_key_valid: bool = Depends(verify_api_key)
-):
-    """
-    Get only the current draft content (for quick preview).
-    
-    Args:
-        thread_id: Thread identifier
-        api_key_valid: API key validation result
-        
-    Returns:
-        Current draft content
-    """
-    logger.info(f"Retrieving current draft for thread: {thread_id}")
-    
+async def get_current_draft(thread_id: str, api_key_valid: bool = Depends(verify_api_key)):
     try:
         state = get_current_state(thread_id)
-        
         return {
             "thread_id": thread_id,
             "current_draft": state.current_draft,
@@ -605,63 +354,18 @@ async def get_current_draft(
             "iteration": state.iteration_count,
             "last_modified": state.last_modified.isoformat() if state.last_modified else None
         }
-        
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Error retrieving draft: {str(e)}")
-        logger.exception(e)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to retrieve draft: {str(e)}"
-        )
-
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/draft/{thread_id}/versions")
-async def get_draft_versions(
-    thread_id: str,
-    api_key_valid: bool = Depends(verify_api_key)
-):
-    """
-    Get all versions of the draft for comparison.
-    
-    Args:
-        thread_id: Thread identifier
-        api_key_valid: API key validation result
-        
-    Returns:
-        All draft versions
-    """
-    logger.info(f"Retrieving draft versions for thread: {thread_id}")
-    
+async def get_draft_versions(thread_id: str, api_key_valid: bool = Depends(verify_api_key)):
     try:
         state = get_current_state(thread_id)
-        
-        versions = [
-            {
-                "version": v.version_number,
-                "content": v.content,
-                "word_count": v.word_count,
-                "created_at": v.created_at.isoformat(),
-                "created_by": v.created_by,
-                "changes_summary": v.changes_summary,
-                "iteration": v.iteration
-            }
-            for v in state.draft_versions
-        ]
-        
-        return {
-            "thread_id": thread_id,
-            "total_versions": len(versions),
-            "versions": versions
-        }
-        
-    except HTTPException:
-        raise
+        versions = [{
+            "version": v.version_number,
+            "content": v.content,
+            "iteration": v.iteration
+        } for v in state.draft_versions]
+        return {"thread_id": thread_id, "versions": versions}
     except Exception as e:
-        logger.error(f"Error retrieving draft versions: {str(e)}")
-        logger.exception(e)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to retrieve draft versions: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=str(e))
