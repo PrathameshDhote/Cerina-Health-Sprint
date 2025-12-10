@@ -146,9 +146,6 @@ class MetadataScores(BaseModel):
 class ProtocolState(BaseModel):
     """
     The central state object that all agents read from and write to.
-    
-    This represents the "blackboard" in our blackboard architecture,
-    enabling rich agent collaboration and state persistence.
     """
     
     # Core Identification
@@ -160,16 +157,13 @@ class ProtocolState(BaseModel):
     final_approved_draft: str = Field(default="", description="Human-approved final version")
     
     # Version History
-    draft_versions: List[DraftVersion] = Field(
-        default_factory=list,
-        description="Historical versions of drafts"
-    )
+    draft_versions: List[DraftVersion] = Field(default_factory=list)
     
     # Iteration Tracking
-    iteration_count: int = Field(default=0, description="Number of agent iterations completed")
-    max_iterations: int = Field(default=5, description="Maximum allowed iterations")
+    iteration_count: int = Field(default=0)
+    max_iterations: int = Field(default=5)
     
-    # The Scratchpad (Agent Collaboration Space)
+    # The Scratchpad
     scratchpad: Dict[str, List[Any]] = Field(
         default_factory=lambda: {
             "drafter_notes": [],
@@ -177,11 +171,10 @@ class ProtocolState(BaseModel):
             "safety_checks": [],
             "critic_feedback": [],
             "supervisor_decisions": [],
-        },
-        description="Shared workspace where agents leave notes for each other"
+        }
     )
     
-    # Structured Agent Outputs (Typed)
+    # Structured Agent Outputs
     safety_flags: List[SafetyFlag] = Field(default_factory=list)
     critic_feedbacks: List[CriticFeedback] = Field(default_factory=list)
     supervisor_decisions: List[SupervisorDecision] = Field(default_factory=list)
@@ -191,10 +184,10 @@ class ProtocolState(BaseModel):
     metadata: MetadataScores = Field(default_factory=MetadataScores)
     
     # Human-in-Loop State
-    halted_at_iteration: Optional[int] = Field(default=None, description="Iteration where workflow halted for human review")
+    halted_at_iteration: Optional[int] = Field(default=None)
     approval_status: ApprovalStatus = Field(default=ApprovalStatus.PENDING)
-    human_feedback: Optional[str] = Field(default=None, description="Feedback provided by human reviewer")
-    human_edited_draft: Optional[str] = Field(default=None, description="Human-edited version of draft")
+    human_feedback: Optional[str] = Field(default=None)
+    human_edited_draft: Optional[str] = Field(default=None)
     
     # Timestamps
     created_at: datetime = Field(default_factory=datetime.now)
@@ -203,12 +196,18 @@ class ProtocolState(BaseModel):
     approved_at: Optional[datetime] = Field(default=None)
     
     # Workflow Control Flags
-    should_halt: bool = Field(default=False, description="Flag to halt workflow for human review")
-    needs_revision: bool = Field(default=False, description="Flag indicating revision is needed")
-    is_finalized: bool = Field(default=False, description="Flag indicating protocol is finalized")
+    should_halt: bool = Field(default=False)
+    needs_revision: bool = Field(default=False)
+    is_finalized: bool = Field(default=False)
+    
+    # ✅ NEW: Bypass halt for MCP requests
+    bypass_halt: bool = Field(
+        default=False,
+        description="If True, skip halt node and go directly to finalize (for MCP)"
+    )
     
     # Error Tracking
-    errors: List[Dict[str, Any]] = Field(default_factory=list, description="Errors encountered during generation")
+    errors: List[Dict[str, Any]] = Field(default_factory=list)
     
     model_config = {"use_enum_values": True}
     

@@ -12,20 +12,42 @@ from utils.logger import logger
 
 def supervisor_router(
     state: ProtocolState
-) -> Literal["drafter", "safety_guardian", "clinical_critic", "halt", "max_iterations"]:
+) -> Literal["drafter", "safety_guardian", "clinical_critic", "halt", "finalize", "max_iterations"]:
     """
-    Supervisor routing logic - determines which node to execute next.
-    
-    This is the core routing function that implements the Supervisor pattern.
-    It evaluates the current state and decides which agent should run next.
-    
-    Args:
-        state: Current protocol state
-        
-    Returns:
-        Name of the next node to execute
+    Supervisor routing logic with MCP bypass support.
     """
     logger.info(f"[Supervisor Router] Evaluating routing (iteration {state.iteration_count})")
+    
+    # ✅ NEW: Check bypass_halt flag (for MCP requests)
+    if state.bypass_halt:
+        logger.info("[Supervisor Router] Bypass mode enabled - checking if ready to finalize")
+        
+        # Check if we have a draft and basic validations
+        if state.current_draft and state.iteration_count > 0:
+            # Check if we've done at least one round of validation
+            has_safety_check = len(state.safety_flags) > 0
+            has_quality_check = len(state.critic_feedbacks) > 0
+            
+            if has_safety_check and has_quality_check:
+                # Get latest quality score
+                latest_feedback = state.critic_feedbacks[-1] if state.critic_feedbacks else None
+                quality_score = latest_feedback.overall_score if latest_feedback else 0
+                
+                # Check for blocking safety issues
+                has_blocking_safety = any(
+                    f.severity.value == "high" 
+                    for f in state.safety_flags[-3:] if hasattr(f.severity, 'value')
+                )
+                
+                # If quality is acceptable and no blocking issues, finalize
+                if quality_score >= 7.5 and not has_blocking_safety:
+                    logger.info(f"[Supervisor Router] Bypass mode: Quality {quality_score}/10 meets threshold, finalizing")
+                    return "finalize"
+                
+                # If we've hit max iterations, finalize anyway
+                if state.iteration_count >= state.max_iterations:
+                    logger.info("[Supervisor Router] Bypass mode: Max iterations reached, finalizing")
+                    return "finalize"
     
     # Check if already halted or finalized
     if state.should_halt or state.is_finalized:
@@ -37,6 +59,11 @@ def supervisor_router(
     
     # Make routing decision
     decision = supervisor.decide_next_action(state)
+    
+    # ✅ NEW: If bypass mode and supervisor wants to halt, finalize instead
+    if state.bypass_halt and decision == "halt_for_human":
+        logger.info("[Supervisor Router] Bypass mode: Converting halt to finalize")
+        return "finalize"
     
     # Map decision to node name
     routing_map = {

@@ -150,40 +150,30 @@ async def generate_protocol(
     """
     Initiate a new protocol generation workflow.
     
-    This creates a new thread and starts the agent workflow.
-    - For web requests: Workflow halts for human review
-    - For MCP requests: Workflow bypasses halt and returns final protocol
-    
-    Args:
-        request: Generation request with user intent
-        background_tasks: FastAPI background tasks
-        api_key_valid: API key validation result
-        
-    Returns:
-        Generation response with thread ID
+    - For web requests (source="web"): Workflow halts for human review
+    - For MCP requests (source="mcp"): Workflow bypasses halt and auto-finalizes
     """
     logger.info(f"Received generation request: {request.user_intent}")
-    logger.info(f"Request source: {request.source}")  # ✅ NEW LOG
+    logger.info(f"Request source: {request.source}")  # ✅ LOG SOURCE
     
     try:
         # Generate unique thread ID
         thread_id = str(uuid4())
         
-        # ✅ NEW: Determine if we should bypass halt
-        # For MCP requests, we want to skip the halt node and go straight to finalize
+        # ✅ Determine if we should bypass halt
         bypass_halt = (request.source == "mcp")
         
-        logger.info(f"Bypass halt mode: {bypass_halt}")  # ✅ NEW LOG
+        logger.info(f"Bypass halt mode: {bypass_halt}")
         
-        # Create initial state
+        # Create initial state with bypass flag
         initial_state = ProtocolState(
             thread_id=thread_id,
             user_intent=request.user_intent,
             max_iterations=request.max_iterations or settings.max_agent_iterations,
-            bypass_halt=bypass_halt  # ✅ NEW: Pass bypass flag to workflow
+            bypass_halt=bypass_halt  # ✅ Pass bypass flag to state
         )
         
-        # Configuration for LangGraph with increased recursion limit
+        # Configuration for LangGraph
         config = {
             "configurable": {
                 "thread_id": thread_id
@@ -193,14 +183,14 @@ async def generate_protocol(
         
         logger.info(f"Starting workflow for thread: {thread_id}")
         
-        # ✅ FIXED: Use async checkpointer context manager
+        # Run workflow with async checkpointer
         workflow_graph = create_protocol_workflow()
         
         async with get_async_checkpointer() as checkpointer:
             compiled_workflow = workflow_graph.compile(checkpointer=checkpointer)
             result = await compiled_workflow.ainvoke(initial_state, config)
         
-        # LangGraph returns a dictionary, not a ProtocolState object
+        # Convert result to ProtocolState
         if isinstance(result, dict):
             final_state = ProtocolState(**result)
         else:
@@ -209,7 +199,7 @@ async def generate_protocol(
         logger.info(f"Workflow completed for thread: {thread_id}")
         logger.info(f"Final state: {final_state.approval_status}, Iteration: {final_state.iteration_count}")
         
-        # ✅ NEW: Different response messages based on mode
+        # ✅ Different response messages based on mode
         if bypass_halt:
             message = "Protocol generation completed. Workflow finalized automatically (MCP mode)."
         else:
@@ -230,6 +220,7 @@ async def generate_protocol(
             status_code=500,
             detail=f"Protocol generation failed: {str(e)}"
         )
+
 
 
 
