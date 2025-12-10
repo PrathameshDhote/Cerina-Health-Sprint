@@ -8,16 +8,17 @@ Exposes the LangGraph CBT protocol workflow as:
 
 from mcp.server.fastmcp import FastMCP
 import httpx
-from typing import Optional
+from typing import Optional, List
 import asyncio
 import time
+import sys  # <--- REQUIRED FOR SAFE LOGGING
 
 mcp = FastMCP("Cerina Protocol Foundry")
 
 API_BASE_URL = "http://localhost:8000/api"
 
 # Store active thread IDs for resource discovery
-_active_threads = []
+_active_threads: List[str] = []
 
 
 # ============================================================================
@@ -46,14 +47,15 @@ async def generate_cbt_protocol(
     """
     async with httpx.AsyncClient(timeout=180.0) as client:
         try:
-            # ✅ FIXED: Pass source="mcp" to enable bypass mode
-            print(f"[MCP] Starting workflow for: {user_intent}")
+            # ✅ LOGGING FIX: Send to stderr to avoid breaking JSON
+            print(f"[MCP] Starting workflow for: {user_intent}", file=sys.stderr)
+            
             response = await client.post(
                 f"{API_BASE_URL}/generate",
                 json={
                     "user_intent": user_intent,
                     "max_iterations": max_iterations,
-                    "source": "mcp"  # ✅ THIS ENABLES BYPASS MODE
+                    "source": "mcp" 
                 }
             )
             
@@ -63,7 +65,7 @@ async def generate_cbt_protocol(
             
             data = response.json()
             thread_id = data['thread_id']
-            print(f"[MCP] Workflow started with thread_id: {thread_id}")
+            print(f"[MCP] Workflow started with thread_id: {thread_id}", file=sys.stderr)
             
             # Track this thread for resources
             if thread_id not in _active_threads:
@@ -94,7 +96,7 @@ Access the final protocol via: `cerina://protocol/{thread_id}`
                         elapsed += poll_interval
                     
                     poll_count += 1
-                    print(f"[MCP] Polling status (attempt {poll_count}, elapsed: {elapsed}s)")
+                    print(f"[MCP] Polling status (attempt {poll_count}, elapsed: {elapsed}s)", file=sys.stderr)
                     
                     try:
                         status_resp = await client.get(
@@ -102,7 +104,7 @@ Access the final protocol via: `cerina://protocol/{thread_id}`
                             timeout=30.0
                         )
                     except httpx.TimeoutException:
-                        print(f"[MCP] Status check timeout on attempt {poll_count}")
+                        print(f"[MCP] Status check timeout on attempt {poll_count}", file=sys.stderr)
                         continue
                     
                     if status_resp.status_code != 200:
@@ -113,11 +115,11 @@ Access the final protocol via: `cerina://protocol/{thread_id}`
                     iteration = status_data.get('iteration_count', 0)
                     is_finalized = status_data.get('is_finalized', False)
                     
-                    print(f"[MCP] Status: {approval_status}, Finalized: {is_finalized}, Iteration: {iteration}")
+                    print(f"[MCP] Status: {approval_status}, Finalized: {is_finalized}, Iteration: {iteration}", file=sys.stderr)
                     
                     # ✅ Check if finalized (should happen automatically with bypass mode)
                     if is_finalized or approval_status == 'approved':
-                        print(f"[MCP] Protocol finalized - returning response")
+                        print(f"[MCP] Protocol finalized - returning response", file=sys.stderr)
                         
                         final_draft = status_data.get('final_approved_draft') or status_data.get('current_draft', 'No draft available')
                         safety_flags = status_data.get('safety_flags_count', 0)
@@ -162,22 +164,38 @@ This protocol was generated through our multi-agent system:
 **Resource URI:** `cerina://protocol/{thread_id}`
 """
                     
+                    # Handle failures
                     elif approval_status in ['failed', 'error']:
-                        print(f"[MCP] Workflow error: {approval_status}")
+                        print(f"[MCP] Workflow error: {approval_status}", file=sys.stderr)
                         return f"❌ **Workflow Error**\n\nStatus: {approval_status}\nThread ID: `{thread_id}`"
+
+                    # Handle case where it halts anyway (fallback)
+                    elif approval_status == 'pending_human_review':
+                         print(f"[MCP] Workflow halted (unexpected in bypass mode) - returning current draft", file=sys.stderr)
+                         current_draft = status_data.get('current_draft', 'No draft available')
+                         return f"""# ⏸️ Protocol Ready for Review
+                         
+**Thread ID:** `{thread_id}`
+**Status:** Pending Review
+
+The system halted for manual review. You can approve it via the API or view the draft below.
+
+---
+{current_draft}
+"""
                     
                     # Still in progress
-                    print(f"[MCP] Still in progress: {approval_status}")
+                    print(f"[MCP] Still in progress: {approval_status}", file=sys.stderr)
                 
                 # Timeout
-                print(f"[MCP] Reached timeout ({max_wait}s)")
+                print(f"[MCP] Reached timeout ({max_wait}s)", file=sys.stderr)
                 return f"⏱️ **Timeout:** Workflow exceeded {max_wait}s.\n\nThread ID: `{thread_id}`\n\nCheck: `cerina://protocol/{thread_id}`"
         
         except httpx.ConnectError as e:
-            print(f"[MCP] Connection error: {str(e)}")
+            print(f"[MCP] Connection error: {str(e)}", file=sys.stderr)
             return "🔌 **Connection Error:** FastAPI server not running at http://localhost:8000"
         except Exception as e:
-            print(f"[MCP] Unexpected error: {str(e)}")
+            print(f"[MCP] Unexpected error: {str(e)}", file=sys.stderr)
             return f"❌ **Unexpected Error:** {str(e)}"
 
 

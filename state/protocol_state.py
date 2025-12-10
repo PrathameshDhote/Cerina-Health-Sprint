@@ -151,6 +151,11 @@ class ProtocolState(BaseModel):
     # Core Identification
     thread_id: str = Field(description="Unique identifier for this protocol generation session")
     user_intent: str = Field(description="Original user request/intent")
+
+    source: Literal["web", "mcp"] = Field(
+        default="web", 
+        description="Source of the request. 'mcp' triggers auto-approval bypass."
+    )
     
     # Content Management
     current_draft: str = Field(default="", description="Current version of the protocol")

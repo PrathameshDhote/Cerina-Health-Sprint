@@ -168,7 +168,20 @@ class SupervisorAgent(BaseAgent):
                         "threshold": self.quality_threshold
                     })
         
-        # All checks passed - halt for human review
+        # =================================================================================
+        # ✅ CRITICAL FIX: BYPASS HUMAN REVIEW FOR MCP
+        # =================================================================================
+        
+        # Check if this request came from MCP
+        # We use getattr in case 'source' isn't in older state versions
+        source = getattr(state, "source", "web")
+        
+        if source == "mcp":
+            self._log_action("MCP Request detected - Bypassing human review")
+            self._record_decision(state, "finalize", "Auto-approving verified draft (MCP Source)")
+            return "finalize"
+
+        # Default Behavior (React/Web): Halt for human
         self._log_action("All validations passed - halting for human review")
         self._record_decision(state, "halt_for_human", "Ready for human review")
         return "halt_for_human"

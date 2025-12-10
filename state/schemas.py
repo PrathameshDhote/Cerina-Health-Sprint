@@ -26,7 +26,6 @@ class GenerationRequest(BaseModel):
         le=10,
         description="Maximum number of agent iterations"
     )
-    # ✅ NEW: Source field to identify MCP requests
     source: Optional[Literal["web", "mcp"]] = Field(
         default="web",
         description="Request source: 'web' for React UI, 'mcp' for MCP server"

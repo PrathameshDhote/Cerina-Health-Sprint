@@ -169,6 +169,7 @@ async def generate_protocol(
         initial_state = ProtocolState(
             thread_id=thread_id,
             user_intent=request.user_intent,
+            source= request.source,
             max_iterations=request.max_iterations or settings.max_agent_iterations,
             bypass_halt=bypass_halt  # ✅ Pass bypass flag to state
         )
